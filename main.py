@@ -21,6 +21,9 @@ from torch.autograd import Variable
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
+parser.add_argument('--ste', action='store_true', help='use straight-through estimator')
+parser.add_argument('--save', type=str, default='output.pt')
+parser.add_argument('--scale-step', type=float, default=1E-3)
 args = parser.parse_args()
 
 use_cuda = torch.cuda.is_available()
@@ -50,35 +53,35 @@ testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False,
 classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
 # Model
+print('==> Building model..')
+net = VGG('VGG11')
+# net = ResNet18()
+# net = PreActResNet18()
+# net = GoogLeNet()
+# net = DenseNet121()
+# net = ResNeXt29_2x64d()
+# net = MobileNet()
+# net = MobileNetV2()
+# net = DPN92()
+# net = ShuffleNetG2()
+# net = SENet18()
 if args.resume:
     # Load checkpoint.
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
     checkpoint = torch.load('./checkpoint/ckpt.t7')
-    net = checkpoint['net']
+    net.load_state_dict(checkpoint['net'], strict=False)
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
-else:
-    print('==> Building model..')
-    # net = VGG('VGG19')
-    # net = ResNet18()
-    # net = PreActResNet18()
-    # net = GoogLeNet()
-    # net = DenseNet121()
-    # net = ResNeXt29_2x64d()
-    # net = MobileNet()
-    net = MobileNetV2()
-    # net = DPN92()
-    # net = ShuffleNetG2()
-    # net = SENet18()
 
 if use_cuda:
     net.cuda()
-    net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
     cudnn.benchmark = True
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+params = net.ctx.list_model_params()
+# params = net.parameters()
+optimizer = optim.SGD(params, lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
 # Training
 def train(epoch):
@@ -99,11 +102,14 @@ def train(epoch):
 
         train_loss += loss.data[0]
         _, predicted = torch.max(outputs.data, 1)
-        total += targets.size(0)
-        correct += predicted.eq(targets.data).cpu().sum()
+        total += float(targets.size(0))
+        correct += float(predicted.eq(targets.data).cpu().sum())
+        scale = net.scale.cpu().data[0]
 
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d) | S: %.4f'
+            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total, scale))
+        if scale < 50:
+            net.scale.data.add_(args.scale_step)
 
 def test(epoch):
     global best_acc
@@ -120,8 +126,8 @@ def test(epoch):
 
         test_loss += loss.data[0]
         _, predicted = torch.max(outputs.data, 1)
-        total += targets.size(0)
-        correct += predicted.eq(targets.data).cpu().sum()
+        total += float(targets.size(0))
+        correct += float(predicted.eq(targets.data).cpu().sum())
 
         progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
             % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
@@ -131,13 +137,13 @@ def test(epoch):
     if acc > best_acc:
         print('Saving..')
         state = {
-            'net': net.module if use_cuda else net,
+            'net': net.state_dict(),
             'acc': acc,
             'epoch': epoch,
         }
         if not os.path.isdir('checkpoint'):
             os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/ckpt.t7')
+        torch.save(state, args.save)
         best_acc = acc
 
 
